@@ -67,6 +67,42 @@ skills:
 - 既存コードとの整合性を保つ
 - 実装中に仕様の曖昧な点があれば、最も合理的な解釈を選び、その判断を記録する
 
+#### 2-Z. domain.json + sprint.json を一次 source として参照 (Phase Z11.0+・存在時のみ)
+
+`plan/sprint.json` + `plan/domain.json` が存在する場合、これらを**実装 spec の一次 source** として扱う (不在なら本節 skip・spec.md prose のみで実装する従来動作)。
+
+##### (a) behavior rule の実装 (domain.json#planned_changes)
+
+1. `plan/domain.json` を Read し、該当 sprint の `planned_changes[]` を抽出
+2. 各 `planned_changes[].kind` に応じて実装:
+   - `add_column` / `new_table` → `fields_added[]` を migration / schema に追加
+   - `new_endpoint` / `modify_endpoint` → `endpoints_added[]` / `target` の controller / route を実装
+   - `modify_behavior` / `new_validation` → **`behavior.rule` の logic を literal に実装** (例: 「form.X が空文字なら null に正規化して entity.col に保存」を controller / service で実装)・`behavior.fields_to_persist[]` の col を永続化経路に伝搬
+3. behavior rule は **domain.json#planned_changes に 1 箇所のみ authored** されている (= test_case には rule が無く literal example のみ)。Generator はこの rule を実装の正本とする。
+
+##### (b) test_case.expected を実装の検証目標として参照 (sprint.json#test_cases)
+
+1. `plan/sprint.json` を Read し `test_cases[]` を抽出
+2. 各 test_case の `expected.db_after.row` / `expected.http` の literal field を「実装が満たすべき具体例」として参照
+   - 同 requirement の複数 test_case (= input variation 違い) の expected を見比べ、behavior rule の実装が全 case を満たすことを確認
+   - 例: TC-a (input X → expected col=X) と TC-b (input "" → expected col=null) の両方を満たす normalization を実装
+3. Generator 自己評価時に「実装が全 test_case.expected を満たすか」を確認できる
+
+##### (c) state factory deliverable (domain.json#named_states)
+
+1. sprint.json の test_case が参照する `state` について `domain.json#named_states[]` を引く
+2. `setup.missing_components[]` が非空の state は **factory 実装が必須** (Generator deliverable):
+   - `missing_components[].kind` に応じて実装 (fixture/factory → test helper / seed → migration / endpoint → controller / helper → utility)
+   - 実装後 `health_check.command_literal` を Bash 実行し `expected_excerpt` 一致を確認・fail → halt: `state-factory-health-check-failed: <state>`
+3. `plan/progress.md` 自己評価 section に `### State Factory deliverable` 節を追加 (対象 state / 追加 file / health check 結果)・missing_components が無い sprint では本節省略
+
+##### 禁止事項 (2-Z)
+
+- behavior rule を test_case から推論する (rule は domain.json#planned_changes が正本・test_case は literal example のみ)
+- domain.json に無い state の factory を自発実装する (Discovery / Planner の責務違反)
+- health check fail のまま先送り (本 sprint の done 条件・解決 or halt)
+- factory 実装で既存業務 rule を緩める (退化的修正・Step 4.6 diff scan で検出)
+
 ### 2-A. halt 判断（実装着手前・実装中・自己評価前のいずれかで該当したら即時停止）
 
 CLAUDE.md「halt プロトコル」に従い、以下に該当したら**コード変更を進めず**、`plan/progress.md` 末尾に `## BLOCKED` 節のみを書いて停止する。**「とりあえず実装して動くか試す」をしない**。
@@ -232,35 +268,39 @@ Generator は原則として spec.md の AC スコープ外を変更しない (C
 
 orchestrator が `findings[].fix_target: "implementation"` を受けて Generator を retry mode で起動した場合、**commit 直前**に以下の機械検査を必ず実行 (自己評価より前):
 
-#### 4.6-A. diff scan による退化検出
+#### 4.6-A. diff scan による退化検出 (Phase Z9+: pattern catalog は runtime config 由来)
+
+退化的修正 pattern catalog は `plan/pge-runtime-config.json#regressive_fix_scan.groups[]` に PJ owner が declare する (`/pge-runtime-survey` Skill が生成)。framework file (本 file) に PJ 固有 annotation literal を hardcode しない。
 
 ```bash
-# 退化的修正パターンを diff から検出
 # 一時ファイル領域 (絶対 path literal を避けるため mktemp -d で確保)
 REGRESSIVE_TMP=$(mktemp -d)
 
-git diff HEAD~1 HEAD -- '*.html' '*.tsx' '*.jsx' '*.vue' '*.svelte' 2>/dev/null | \
-  grep -E "^-.*(maxlength=|pattern=|required\b|min=|max=|type=\"email\"|type=\"number\"|type=\"tel\"|type=\"url\"|aria-[a-z]+=|role=)" \
-  > "$REGRESSIVE_TMP/regressive-html.txt"
-
-# Java の正規表現は Jakarta Bean Validation + Spring Security の代表的 annotation を列挙
-# Quarkus (`@RolesAllowed`) / Micronaut (`@Secured` 等) や他 JVM framework で
-# 追加 annotation を扱う場合は本 grep に append すること
-git diff HEAD~1 HEAD -- '*.java' '*.kt' 2>/dev/null | \
-  grep -E "^-.*(@Size|@NotBlank|@NotNull|@Valid|@Pattern|@Min|@Max|@Email|@CsrfToken|@PreAuthorize|@Secured)" \
-  > "$REGRESSIVE_TMP/regressive-java.txt"
-
-git diff HEAD~1 HEAD -- '*.py' 2>/dev/null | \
-  grep -E "^-.*(validators\.|@validate_|csrf_exempt|login_required)" \
-  > "$REGRESSIVE_TMP/regressive-py.txt"
-
-git diff HEAD~1 HEAD -- '*.rb' 2>/dev/null | \
-  grep -E "^-.*(validates\s|protect_from_forgery|before_action.*authenticate)" \
-  > "$REGRESSIVE_TMP/regressive-rb.txt"
-
-[ -s "$REGRESSIVE_TMP/regressive-html.txt" ] || [ -s "$REGRESSIVE_TMP/regressive-java.txt" ] || \
-[ -s "$REGRESSIVE_TMP/regressive-py.txt" ] || [ -s "$REGRESSIVE_TMP/regressive-rb.txt" ] && echo "REGRESSIVE_FIX_DETECTED"
+# runtime config 不在 / 本 section 未定義の PJ は dis-armed (warning + skip)
+if [ ! -f plan/pge-runtime-config.json ]; then
+  echo "WARNING: plan/pge-runtime-config.json absent. Regressive fix scan skipped (run /pge-runtime-survey to enable)." >&2
+elif ! jq -e '.regressive_fix_scan.groups | length > 0' plan/pge-runtime-config.json > /dev/null 2>&1; then
+  echo "WARNING: regressive_fix_scan.groups empty or undefined. Scan skipped (run /pge-runtime-survey to populate)." >&2
+else
+  REGRESSIVE_DETECTED=0
+  # 各 group を順に scan (group_id / file_globs / removed_token_regex を runtime config から literal echo)
+  group_count=$(jq -r '.regressive_fix_scan.groups | length' plan/pge-runtime-config.json)
+  for i in $(seq 0 $((group_count - 1))); do
+    group_id=$(jq -r ".regressive_fix_scan.groups[$i].id" plan/pge-runtime-config.json)
+    pattern=$(jq -r ".regressive_fix_scan.groups[$i].removed_token_regex" plan/pge-runtime-config.json)
+    # file_globs[] を space-separated string に
+    globs=$(jq -r ".regressive_fix_scan.groups[$i].file_globs | join(\" \")" plan/pge-runtime-config.json)
+    # eval は file_globs の glob 展開を git に任せるため (config 由来 literal のみ・LLM 生成値ではない)
+    eval "git diff HEAD~1 HEAD -- $globs" 2>/dev/null | \
+      grep -E "^-.*${pattern}" \
+      > "${REGRESSIVE_TMP}/regressive-${group_id}.txt" || true
+    [ -s "${REGRESSIVE_TMP}/regressive-${group_id}.txt" ] && REGRESSIVE_DETECTED=1
+  done
+  [ "$REGRESSIVE_DETECTED" -eq 1 ] && echo "REGRESSIVE_FIX_DETECTED"
+fi
 ```
+
+groups[] が空 (= PJ owner が detect 不要と判定) の PJ では本 self-check は skip される (退化的修正検知の責任は `/pge-convention-survey` の bundle・PJ CI / lint に委譲)。
 
 #### 4.6-B. 検出時の対応
 

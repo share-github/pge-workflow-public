@@ -6,6 +6,7 @@ export const meta = {
     { title: 'Discovery',  detail: 'plan/pge-runtime-config.json / spec.md / progress.md から deterministic に sprint state 抽出' },
     { title: 'Generator',  detail: '仕様実装 (1 sprint 分)' },
     { title: 'Build-Image', detail: 'Generator 後の app image rebuild (runtime config app.dockerfile_path 宣言時のみ・src 変更が container 内 artifact に反映されない問題の構造的解決)' },
+    { title: 'Test-Fixture-Setup', detail: 'Phase Z3+: SUT root に .pge-fixtures.ts を generate (runtime config の test_runner.noise_filter から network_abort / console_suppress_pattern を literal 注入・per-iteration ではなく sprint initial run のみ 1 回)' },
     { title: 'TI',         detail: 'Investigator phase 1+2 parallel + phase 3' },
     { title: 'DB-Setup',   detail: 'v2: 2 wire 自動判定のみ (iteration 0)・parallel mode 不満足なら halt・実際の起動は Per-AC 内' },
     { title: 'Contracts',  detail: 'Step 4.5 deterministic contracts (bash + jq)' },
@@ -117,10 +118,12 @@ const discovery = await agent(
    - 取得した文字列を **そのまま** \`runtime_config_raw\` field に格納 (= 各 nested field の選別 / 整形 / 再構築を一切しない・LLM が "重要そうな field だけ抜く" 介入を排除)
    - workflow JS 側で JSON.parse して deterministic に消費する
 
-2. **plan/spec.md**: 全 sprint 構成を抽出
-   - "## Sprint N:" 見出しを grep
-   - 各 sprint の "AC-K [..]" 行から AC ID を抽出 (sed/awk)
-   - sprints[] と total_sprint_count に格納
+2. **plan/sprint.json** (Phase Z11.0+ 一次 source・存在時はこちらを優先):
+   - \`jq -r '.sprint'\` で sprint ラベルを取得 → 末尾の数値を sprint 番号に (例 "Sprint 1" → 1・数値が取れなければ 1)
+   - \`jq -r '.test_cases[].id'\` で per-AC 評価単位の id 一覧を取得 (id prefix は framework 共通の \`AC-\`・この一覧が ac_ids)
+   - \`jq -r '.feature'\` を name に
+   - sprints は **単一 entry** [{ sprint: <N>, name: <feature>, ac_ids: [<test_cases ids>] }]・total_sprint_count = 1
+   - **fallback**: plan/sprint.json が不在のときのみ plan/spec.md の legacy parse ("## Sprint N:" 見出し + "AC-K [..]" 行を sed/awk) で sprints[] / total_sprint_count を構成
 
 3. **plan/progress.md**: 完了済 sprint の判定
    - "## Sprint N" + "ステータス: ... 完了" を grep
@@ -134,7 +137,8 @@ const discovery = await agent(
    - last_completed_sprint == total_sprint_count → blocker={ reason: "all-sprints-completed" }
 
 5. **失敗条件 → blocker で halt return**:
-   - plan/spec.md 不在 → "planning-not-done"
+   - plan/sprint.json と plan/spec.md が両方不在 → "planning-not-done"
+   - plan/sprint.json は在るが plan/domain.json が不在 → "domain-missing" (Generator / per-AC が SUT facts を引けない・Discovery 未完の疑い)
    - plan/pge-runtime-config.json 不在 → "runtime-config-missing"
    - 全 sprint 完了済 → "all-sprints-completed"
 
@@ -324,7 +328,7 @@ const PER_AC_SCHEMA = {
       properties: {
         file: { type: 'string' },
         runner_command: { type: 'string' },
-        artifact_framework: { enum: ['F-playwright-ts', 'F-bash-script', 'F-sql-with-bash-wrapper'] },
+        artifact_framework: { enum: ['F-playwright-ts', 'F-http-request-curl', 'F-bash-script', 'F-sql-with-bash-wrapper'] },
       },
     },
     self_execution_result: { type: ['object', 'null'] },
@@ -613,6 +617,8 @@ ${parallelDbMode ? `db_container_name: ${dbContainerName}
 ` : ''}${seedBlock}monitor_dir: plan/monitor/eval-${slug}-sprint-${sprint}/
 SUT root: ${sutRoot}
 runtime_config: plan/pge-runtime-config.json (PJ 固有値の一次資料・必要に応じて Read)
+test_case_source: plan/sprint.json#test_cases[] から id == ${acId} の entry を Read (state / input / expected の literal 一次 source・Phase Z11.0+)
+state_source: plan/domain.json#named_states[] (test_case.state が参照する state setup template・Phase Z11.0+)
 
 agent 定義 (.claude/agents/evaluator-per-ac.md) の Step 0 → 5 → 6 → 7 → 8 → 9 → 10 → 11 を順番通り実行。test artifact は **app_url を baseURL として使う** (routing header は不要・v2 では各 AC の app は単一 DataSource を持ち独立)。
 \`plan/feedback/sprint-${sprint}/${acId}.json\` + \`e2e/sprint-${sprint}/${acId}.<ext>\` を Write。Step 9 self-execution + Step 10 retry loop (N=3) は **必ず実行** (skip 禁止・verdict が blocked 以外なら self_execution_result を non-null で埋める)。完了時は return value として \`${acId}.json\` の内容そのものを JSON で返せ。`
@@ -638,7 +644,7 @@ mode: ${mode}
 monitor_dir: plan/monitor/eval-aggregator-sprint-${sprint}/
 
 入力:
-- plan/spec.md / progress.md
+- plan/sprint.json (#test_cases = AC 一覧・Phase Z11.0+) + plan/domain.json (#endpoints[].messages[].literal = business_rule_conflict regex source) / plan/progress.md / plan/spec.md (thin pointer)
 - plan/feedback/sprint-${sprint}/AC-*.json (全件)
 - plan/feedback/sprint-${sprint}/_smoke.json
 - plan/feedback/sprint-${sprint}/_audit.json
@@ -664,7 +670,7 @@ sprint: ${sprint}
 monitor_dir: plan/monitor/expert-reviewer-sprint-${sprint}/
 
 入力:
-- plan/spec.md / progress.md
+- plan/sprint.json (#test_cases = AC 一覧・Phase Z11.0+) + plan/domain.json (SUT facts) / plan/progress.md / plan/spec.md (thin pointer)
 - plan/feedback/${mode === 'final' ? 'final.json' : `sprint-${sprint}.json`}
 - plan/feedback/sprint-${sprint}/AC-*.json (必要に応じて)
 - ${sutRoot}/evidence/ (必要に応じて)
@@ -679,7 +685,7 @@ const genPrompt = (iteration, retryHint) =>
 sprint: ${sprint}
 monitor_dir: plan/monitor/generator-sprint-${sprint}/
 
-agent 定義 (.claude/agents/generator.md) の通り plan/spec.md を Read し、未着手 sprint を 1 個実装。完了後 plan/progress.md に自己評価 + 起動コマンド + 引き渡し事項を書く。
+agent 定義 (.claude/agents/generator.md) の通り実装する。一次 source は **plan/domain.json (#planned_changes = behavior rule の正本) + plan/sprint.json (#test_cases.expected = 実装の検証目標 / #test_cases.state が参照する domain.json#named_states = state factory)** (Phase Z11.0+)。plan/spec.md は thin pointer (人間レビュー用 plan/spec-visual.html への案内) なので AC literal の source にしない。未着手 sprint を 1 個実装し、完了後 plan/progress.md に自己評価 + 起動コマンド + 引き渡し事項を書く。
 
 ${retryHint ? `## Retry 文脈 (前 iteration の失敗を踏まえて修正)
 source: ${retryHint.source}
@@ -715,12 +721,12 @@ sprint: ${sprint}
 - plan/test-investigation/phase2/controller_action_map.json (optional)
 - plan/test-investigation/phase2/route_map.json (optional)
 - plan/test-investigation/phase1/*/aria_snapshot.yaml (optional)
-- plan/spec.md (AC 一覧抽出 source)
+- plan/sprint.json#test_cases[].id (AC id 一覧抽出 source・Phase Z11.0+) / 不在時のみ plan/spec.md の AC 行 fallback
 
 agent 定義 (.claude/skills/test-design-contracts/SKILL.md) の bash + jq one-liner を **deterministic に**実行:
 
 1. mkdir -p plan/test-design/contracts/
-2. spec.md から AC-1..AC-N を抽出
+2. plan/sprint.json#test_cases[].id から AC id 一覧を抽出 (\`jq -r '.test_cases[].id'\`)・sprint.json 不在時のみ spec.md から AC-1..AC-N を抽出
 3. routes_touched は **空発行** で OK
 4. write_set / read_set / pollution graph / fixture strategy を jq で算出
 5. multiplicity_hint を grep + jq で算出
@@ -949,6 +955,103 @@ const BUILD_IMAGE_SCHEMA = {
     image_id: { type: ['string', 'null'] },
     stderr_excerpt: { type: ['string', 'null'] },
   },
+}
+
+const FIXTURE_SETUP_SCHEMA = {
+  type: 'object',
+  required: ['success', 'file_path'],
+  properties: {
+    success: { type: 'boolean' },
+    file_path: { type: 'string' },
+    bytes_written: { type: ['number', 'null'] },
+    stderr_excerpt: { type: ['string', 'null'] },
+  },
+}
+
+// ────────────────────────────────────────────────────────────────
+// Test-Fixture-Setup: SUT root に .pge-fixtures.ts を generate (Phase Z3+)
+// runtime config の test_runner.noise_filter から network_abort /
+// console_suppress_pattern を literal 注入し、Playwright fixture fragment を
+// 1 file 書き出す。LLM 推論で内容を改変させない (workflow JS で確定済 literal
+// をそのまま渡し、agent は Write tool で書くだけ)。
+// per-iteration ではなく sprint initial run のみ 1 回 generate。
+// 詳細規約は .claude/references/playwright-fixture-template.md を参照。
+// ────────────────────────────────────────────────────────────────
+const fixtureSetupPrompt = () => {
+  const sutRoot = config.sut_root
+  const tr = config.test_runner || {}
+  const nf = tr.noise_filter || {}
+  const networkPatterns = Array.isArray(nf.network_abort) ? nf.network_abort : []
+  const consolePattern = typeof nf.console_suppress_pattern === 'string' ? nf.console_suppress_pattern : ''
+
+  const networkBody = networkPatterns.length === 0
+    ? ''
+    : networkPatterns.map((p) => `  ${JSON.stringify(p)},`).join('\n') + '\n'
+  const consoleLine = consolePattern
+    ? `const NOISE_CONSOLE_PATTERN: RegExp | null = new RegExp(${JSON.stringify(consolePattern)});`
+    : 'const NOISE_CONSOLE_PATTERN: RegExp | null = null;'
+
+  const fragmentContent = [
+    '// .pge-fixtures.ts',
+    '// PGE が runtime_config.test_runner.noise_filter から自動生成する fixture fragment。',
+    '// このファイルを手で編集すると次回 sprint で上書きされる (PJ owner は編集禁止)。',
+    '// PJ の playwright.config.ts はこの fixture を import する規約に従う。',
+    '',
+    "import { test as base, expect, type Page } from '@playwright/test';",
+    '',
+    'const NOISE_NETWORK_PATTERNS: string[] = [',
+    networkBody + '];',
+    '',
+    consoleLine,
+    '',
+    'export const test = base.extend<{ pgeFixtures: void }>({',
+    '  pgeFixtures: [',
+    '    async ({ page }, use) => {',
+    '      for (const pattern of NOISE_NETWORK_PATTERNS) {',
+    '        await page.route(pattern, (route) => route.abort());',
+    '      }',
+    '      if (NOISE_CONSOLE_PATTERN) {',
+    "        page.on('console', (msg) => {",
+    '          if (NOISE_CONSOLE_PATTERN.test(msg.text())) {',
+    '            return;',
+    '          }',
+    '        });',
+    '      }',
+    '      await use();',
+    '    },',
+    '    { auto: true },',
+    '  ],',
+    '});',
+    '',
+    'export { expect };',
+    'export type { Page };',
+    '',
+  ].join('\n')
+
+  return `Workflow pge-sprint-cycle から Test-Fixture-Setup として起動 (sprint initial run のみ 1 回・per-iteration ではない)。
+
+sut_root: ${sutRoot}
+target_file: ${sutRoot}/.pge-fixtures.ts
+
+責務: 下記 FRAGMENT_BEGIN / FRAGMENT_END 間の literal content を **Write tool** で ${sutRoot}/.pge-fixtures.ts に書く。LLM 推論で内容を改変しない (workflow JS が確定済 literal をそのまま渡している・改変は禁止)。
+
+FRAGMENT_BEGIN
+${fragmentContent}
+FRAGMENT_END
+
+完了後 StructuredOutput で:
+{
+  success: bool,                       // Write が成功したら true
+  file_path: "${sutRoot}/.pge-fixtures.ts",
+  bytes_written: number|null,          // 書き込んだ bytes 数 (取得できれば)
+  stderr_excerpt: string|null          // 失敗時のみエラー断片
+}
+
+注意:
+- Write tool 1 回で完結 (既存ファイルがあっても全置換 OK)
+- FRAGMENT_BEGIN / FRAGMENT_END マーカー自体は file に含めない (内側 content のみ)
+- LLM 推論で fragment 構造を再構築しない (literal echo のみ)
+- 詳細規約は .claude/references/playwright-fixture-template.md を参照`
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1203,6 +1306,37 @@ async function runStep4to4_5(iteration, retryHint) {
 
   return { generator: gen, tiPhase12: tiResults, tiPhase3, contracts }
 }
+
+// ────────────────────────────────────────────────────────────────
+// Test-Fixture-Setup (Phase Z3+): sprint initial run のみ 1 回・per-iteration
+// ではない。runtime_config.test_runner.noise_filter から .pge-fixtures.ts を
+// SUT root に generate (LLM 推論ゼロ・workflow JS で literal 確定)。
+// 失敗時は halt (blocker.reason: 'pge-fixture-write-failed')。
+// ────────────────────────────────────────────────────────────────
+phase('Test-Fixture-Setup')
+const fixture = await agent(fixtureSetupPrompt(), {
+  label: 'fixture-setup',
+  phase: 'Test-Fixture-Setup',
+  agentType: 'general-purpose',
+  schema: FIXTURE_SETUP_SCHEMA,
+})
+if (!fixture || !fixture.success) {
+  log(`fixture-setup failed: ${fixture?.stderr_excerpt || '(unknown)'}`)
+  // halt: 後続 Per-AC が .pge-fixtures.ts を import できず大量の test 失敗を招くため
+  // まだ iteration loop に入っていない (DB clone 未起動) ので returnWithDispose は不要
+  return {
+    action: 'halt',
+    stage: 'fixture-setup',
+    blocker: {
+      reason: 'pge-fixture-write-failed',
+      detail: `${config.sut_root}/.pge-fixtures.ts への Write が失敗。stderr 末尾: ${fixture?.stderr_excerpt || '(unavailable)'}`,
+      attempted_recovery: ['fragment 内容は workflow JS で確定済・agent への伝達 / Write 権限が原因の可能性'],
+      human_decision_needed: 'SUT root の書き込み権限を確認・workflow を再実行してください',
+    },
+    fixture,
+  }
+}
+log(`fixture-setup done: ${fixture.file_path}${fixture.bytes_written ? ` (${fixture.bytes_written} bytes)` : ''}`)
 
 // ────────────────────────────────────────────────────────────────
 // MAIN CYCLE: while loop で Generator retry を機械的に closure

@@ -125,6 +125,25 @@ else
       "OS の package manager で lsof / ss / fuser のいずれかを追加 (commands 名は POSIX 系で共通・パッケージ名は distro 依存)"
 fi
 
+# --- 8 (Phase Z3+). playwright.config の trace 設定 -------------------------
+# Step 10 retry で trace bundle を LLM input 化するため・PJ owner が手動 declare する責任
+pw_config=""
+for c in "$SUT_ROOT/playwright.config.ts" "$SUT_ROOT/playwright.config.js" "$SUT_ROOT/playwright.config.cjs"; do
+  if [ -f "$c" ]; then
+    pw_config="$c"
+    break
+  fi
+done
+if [ -z "$pw_config" ]; then
+  err "playwright.config.{ts,js,cjs} not found at SUT root" \
+      "PJ owner が playwright.config.ts を SUT root に配置してください (詳細は .claude/references/playwright-fixture-template.md '4. PJ-level config 規約' 節)"
+elif grep -qE "trace:\s*['\"]on-first-retry['\"]" "$pw_config"; then
+  pass "playwright.config has trace: 'on-first-retry' (Phase Z3+ 必須)"
+else
+  err "playwright.config does NOT declare trace: 'on-first-retry'" \
+      "PJ owner が ${pw_config} の use: block に 'trace: \\'on-first-retry\\', screenshot: \\'only-on-failure\\'' を追加 (詳細は .claude/references/playwright-fixture-template.md '4. PJ-level config 規約' 節)"
+fi
+
 # --- 結果集計 ---------------------------------------------------------------
 echo
 if [ "$fail" -eq 0 ]; then

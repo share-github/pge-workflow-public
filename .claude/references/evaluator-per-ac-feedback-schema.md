@@ -22,7 +22,7 @@ per-AC JSON を `plan/feedback/sprint-N/AC-K.json` に書き出す**直前に必
 | `spec_ref` | 必須 | `design_self_authored: true` 固定・`test_design_anchor: null`・`test_design_observation_points[]` は per-AC が確定した `design.observation_capabilities[]` を転記 (Phase Z2) |
 | **`design`** (Phase Z2: capability composition) | **必須 (verdict が "blocked" 以外のとき)** | **evaluator が Step 0 で capability composition で確定した内容** — trigger_capabilities / observation_capabilities / artifact_framework / routes_touched / fixture_strategy / locator_specificity / data_prep / mutation_hypotheses / expected_failures / scenarios / tautology_defense_local を含む。詳細は本ファイル「per-AC design fields (Phase Z2: capability-based)」節 |
 | **`test_artifact`** (Phase Z2: 必須) | **必須 (verdict が "blocked" 以外のとき)** | **evaluator が Step 6 で生成した artifact の path + runner_command + framework**。evaluator-per-ac Step 9 self-execution が dispatch に使う (Phase Z5)。詳細は本ファイル「test_artifact field (Phase Z2)」節 |
-| **`self_execution_result`** (Phase Z5: 必須) | **必須 (verdict が "blocked" 以外のとき・ただし retry-exhausted-n3 の blocked 時は null)** | **evaluator-per-ac Step 9 self-execution の結果**。`exit_code` / `stdout_excerpt` / `stderr_excerpt` / `failure_mode_signal` / `classification_evidence` を含む。詳細は本ファイル「self_execution_result field (Phase Z5)」節 |
+| **`self_execution_result`** (Phase Z5: 必須) | **必須 (verdict が "blocked" 以外のとき・ただし retry-exhausted-n3 の blocked 時は null)** | **evaluator-per-ac Step 9 self-execution の結果**。`exit_code` / `stdout_excerpt` / `stderr_excerpt` / `failure_mode_signal` / `classification_evidence` / `trace_bundle_path` (Phase Z3+) を含む。`trace_bundle_path` は F-playwright-ts + exit_code != 0 のとき `plan/feedback/sprint-N/AC-K-trace.md` (失敗 step の構造化診断情報) を literal で記録・pass 時 or 抽出失敗時は null。Step 10 retry は本 path を Read して stderr_excerpt 500 char 依存を脱却する。詳細は本ファイル「self_execution_result field (Phase Z5)」節 |
 | `retry_local_metadata` (Phase Z5: 任意) | 任意 (retry が発生した場合のみ) | per-AC 内 retry loop (Step 10) の全 iteration 記録。`iteration` / `history[]` を含む |
 | `escalation_context` (Phase Z5: 任意) | 任意 (retry-exhausted-n3 blocked 時のみ必須) | Step 11 escalation 準備の内容。schema の詳細は `evaluator-per-ac-retry-protocol.md` §(c) を参照 |
 
@@ -169,9 +169,11 @@ Playwright Test Runner            │
     "locator_specificity": [
       {
         "scenario_id": "TC-AC-K-S1",
-        "locator": "page.locator('<scope CSS selector from locator_catalog.json>').getByText(/<expected count pattern>/)",
-        "uniqueness_evidence": "<list screen aria_snapshot.yaml で同 token が N 件出現・<scope CSS selector> は unique container>",
-        "chain_scope": "<scope CSS selector from multiplicity_hint.json>",
+        "ie_id": "IE-N",
+        "locator": "<selector_literal echoed from locator_catalog.json#by_element_id[IE-N].selected.selector_literal>",
+        "uniqueness_evidence": "<verified_pattern echoed from locator_catalog.json#by_element_id[IE-N].selected.uniqueness.verified_pattern>",
+        "chain_scope": "<scope CSS selector from multiplicity_hint.json (count > 1 token のとき必須)>",
+        "locator_catalog_consumed": true,
         "multiplicity_hint_consumed": true
       }
     ],
@@ -306,7 +308,7 @@ Playwright Test Runner            │
 | `routes_touched[]` | HTTP 系 capability を使う場合のみ非空・`{method, path, action_id, branch}` を 1-3 件・**`path` は route_map.json#routes に存在必須**・POST/PUT/PATCH は `branch: "on_success"` or `"on_validation_error"` 必須 |
 | `validation_layer` | form / API 系 capability を使う場合のみ `"browser"` / `"server"` / `"both"` / `null` から選択・他 capability では `null` OK |
 | `fixture_strategy` | `isolation_contract.json` 存在時は `contract_echo: true` 必須・contract.strategy / prefix_or_uuid / polluted_by を literal echo |
-| `locator_specificity[]` | Playwright 系 capability を使う場合のみ非空・`multiplicity_hint.json` で `count > 1` の token なら `chain_scope` に hint.recommended_chain_scope 採用 + `multiplicity_hint_consumed: true` 必須 |
+| `locator_specificity[]` | Playwright 系 capability を使う場合のみ非空・**`locator_catalog.json` (schema_version 2) 存在時は contract echo 必須**: `by_ac[AC-K]` に列挙された IE-N について `by_element_id[IE-N].selected.selector_literal` を `locator` field に literal echo + `ie_id` field に IE-N を literal echo + `locator_catalog_consumed: true`・`multiplicity_hint.json` で `count > 1` の token なら `chain_scope` に hint.recommended_chain_scope 採用 + `multiplicity_hint_consumed: true` 必須 |
 | `data_prep.literal_steps[]` | 使用 capability に応じた literal command (Playwright operation / bash command / SQL statement)・TI Phase 2/3 artifacts を literal reference・推測禁止 |
 | `mutation_hypotheses[]` | 各 entry に `id` / `description` / `detection_path`・detection_path は observation_capabilities[] のいずれかが catch する path |
 | `expected_failures[]` | 使用 capability に応じた literal failure (HTTP: `{urlPattern, status, business_rationale}` / shell: `{expected_exit_code | stderr_pattern, business_rationale}` / SQL: `{sql_error_pattern, business_rationale}`)・route_map / api_contract_map 等で grounded 必須 |
@@ -360,6 +362,24 @@ done
 # scenarios に happy が 1 件以上 (negative は capability に応じて optional)
 happy_count=$(jq '[.design.scenarios[] | select(.type == "happy_path")] | length' "$ac_json")
 [ "$happy_count" -ge 1 ] || { echo "scenarios: no happy_path" >&2; exit 1; }
+
+# locator_catalog.json (schema_version 2) contract echo (Phase Z3+)
+# Playwright 系 capability + AC が by_ac に列挙されている + selected != null の IE-N について echo 必須
+locator_catalog="plan/test-investigation/phase3/locator_catalog.json"
+if [ -f "$locator_catalog" ] && [ "$(jq -r '.schema_version // "0"' "$locator_catalog")" = "2" ]; then
+  ac_id=$(jq -r '.ac_id' "$ac_json")
+  uses_playwright=$(jq '[.design.trigger_capabilities[], .design.observation_capabilities[]] | map(test("playwright|aria|dom")) | any' "$ac_json")
+  if [ "$uses_playwright" = "true" ]; then
+    expected_ies=$(jq -r --arg ac "$ac_id" '.by_ac[$ac] // [] | .[]' "$locator_catalog")
+    for ie in $expected_ies; do
+      sel_avail=$(jq -r --arg ie "$ie" '.by_element_id[$ie].selected // null' "$locator_catalog")
+      [ "$sel_avail" = "null" ] && continue  # selected: null は chain_scope fallback 経路に委ねる
+      # AC.json の locator_specificity[] に該当 IE-N の contract echo が存在するか
+      echoed=$(jq --arg ie "$ie" '[.design.locator_specificity[]? | select(.ie_id == $ie and .locator_catalog_consumed == true)] | length' "$ac_json")
+      [ "$echoed" -ge 1 ] || { echo "locator_catalog contract not echoed for $ie" >&2; exit 1; }
+    done
+  fi
+fi
 
 # HTTP 系 capability を使う場合は routes_touched.path が route_map に存在
 uses_http=$(jq -r '.design.trigger_capabilities[] | select(test("http"))' "$ac_json" | head -1)
@@ -443,6 +463,7 @@ Step 9 self-execution が exit_code=0 で完了したときの per-AC JSON の `
     "stderr_excerpt": "",
     "failure_mode_signal": null,
     "classification_evidence": null,
+    "trace_bundle_path": null,
     "tests_run_local": [
       {"type": "playwright", "file": "e2e/sprint-N/AC-K.spec.ts", "passed": 2, "failed": 0, "duration_ms": 8300}
     ]

@@ -17,6 +17,8 @@ disable-model-invocation: true
 
 これにより evaluator per-ac は cross-AC reasoning + DOM 多重度推測を**しなくて済む** (契約・hint を Step 0 で echo するだけ)。
 
+**関連: Phase 3 が生成する `locator_catalog.json` (schema_version 2)** も同じ contract enforcement pattern で運用される (`by_element_id[IE-N].selected.selector_literal` を Step 0-g で literal echo・`locator_catalog_consumed: true` 必須)。生成元は本 skill (Step 4.5) ではなく investigator phase 3 だが、消費側の規約は等価 (詳細は [`.claude/references/test-investigator-phase3-schemas.md`](../../references/test-investigator-phase3-schemas.md))。
+
 ## 2. 出力先パス (固定)
 
 | 出力 | パス | 書き込み権限 |
@@ -32,7 +34,7 @@ disable-model-invocation: true
   "source_inputs": {
     "controller_action_map": "plan/test-investigation/phase2/controller_action_map.json",
     "route_map": "plan/test-investigation/phase2/route_map.json",
-    "spec": "plan/spec.md",
+    "spec": "plan/sprint.json (Phase Z11.0+ AC 一覧 = test_cases[].id・不在時 plan/spec.md fallback)",
     "fragments_routes_touched": ["plan/test-design/fragments/AC-K.json#routes_touched"]
   },
   "contracts": {
@@ -138,7 +140,7 @@ bootstrap data は「最初から存在する write」として扱い、pollutio
         "token": "件",
         "route": "/<resource>",
         "count_in_aria_snapshot": 3,
-        "recommended_chain_scope": ".search-result-summary",
+        "recommended_chain_scope": ".<container-class-or-id>",
         "rationale": "/<resource> の aria_snapshot.yaml に '件' が 3 回出現。fuzzy locator は container scope での chain 必須 (Playwright Strict Mode 違反回避)。"
       }
     ]
@@ -149,7 +151,7 @@ bootstrap data は「最初から存在する write」として扱い、pollutio
 
 ### 4-a. token 抽出ルール
 
-各 AC の spec.md 該当節 (`### AC-K` 等) から以下の token を抽出:
+AC 一覧は `plan/sprint.json#test_cases[].id` から取得する (Phase Z11.0+・`jq -r '.test_cases[].id'`・sprint.json 不在時のみ spec.md の `### AC-K` 節 fallback)。各 AC の token は sprint.json では `test_cases[].label` + `expected.http.html_contains[]`、spec.md fallback 時は該当節から、以下を抽出:
 
 - 日本語の単位 / 助数詞: `件`, `個`, `回`, `名`, etc.
 - 動詞 + 副詞の組: `表示する`, `非表示にする`, etc.
@@ -247,7 +249,7 @@ fragment は contract presence を Read 前に確認し:
 
 - contract に LLM 推論結果を混入させない (本 step は deterministic preprocessor)
 - contract 生成 step で `Agent(subagent_type=...)` を起動しない (orchestrator の bash + jq のみで完結)
-- evaluator per-ac Step 0 内で contract を **無視して** 自己推論で上書きしない (contract がある場合は echo 必須・`contract_echo: true` / `multiplicity_hint_consumed: true` 必須)
+- evaluator per-ac Step 0 内で contract を **無視して** 自己推論で上書きしない (contract がある場合は echo 必須・`contract_echo: true` / `multiplicity_hint_consumed: true` / `locator_catalog_consumed: true` 必須)
 - contract と per-AC JSON `design.fixture_strategy` を **同時に書く** 操作はしない (contract → evaluator Read → per-AC JSON Write の順序保証)
 
 ## 8. 関連ファイル
@@ -255,3 +257,5 @@ fragment は contract presence を Read 前に確認し:
 - `.claude/workflows/pge-sprint-cycle.js` Step 4.5 — 本 catalog の inline 規約 (behavioral rule・contracts step prompt)
 - `.claude/agents/evaluator-per-ac.md` — per-ac Step 0 で contract を Read する規約 (Phase Z1+Z4)
 - `.claude/references/evaluator-per-ac-feedback-schema.md` — per-AC JSON `design.fixture_strategy` / `design.locator_specificity` の contract echo 規約
+- `.claude/references/test-investigator-phase3-schemas.md` — `locator_catalog.json` (schema_version 2) schema (investigator phase 3 が生成・同じ contract enforcement pattern)
+- `.claude/agents/investigator.md` Phase 3 節 — locator_catalog の AX-first 機械検証 + by_ac 導出規約

@@ -109,7 +109,7 @@ sources: ["<path1>", "<path2>", ...]
 
 組み立て後の bundle が **30,000 tokens を超えると推定される場合** (≒ 120 KB 以上)、AskUserQuestion で人間に通知:
 
-- 選択肢 A: 末尾を truncation して 30k token 内に収める (冒頭優先 keep・PGE 側の運用方針)
+- 選択肢 A: 末尾を truncation して 30k token 内に収める (冒頭優先 keep・Anthropic context engineering 指針)
 - 選択肢 B: 採用 source を絞る (Step 3 に戻る)
 - 選択肢 C: そのまま生成する (workflow side で truncation する責務に倒す)
 

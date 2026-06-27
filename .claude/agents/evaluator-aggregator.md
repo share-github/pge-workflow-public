@@ -18,8 +18,10 @@ model: sonnet
 
 | パス | 用途 |
 |---|---|
-| `plan/spec.md` | 全 AC 一覧・最大スプリント番号 |
+| `plan/sprint.json` (Phase Z11.0+ 一次 source) | 全 AC 一覧 (`test_cases[].id` = `AC-N`) + sprint 番号 (`.sprint`)・存在時はこちらを優先 |
+| `plan/spec.md` | (sprint.json 不在時の fallback) 全 AC 一覧・最大スプリント番号。Z11.1+ は thin pointer のため通常 sprint.json を使う |
 | `plan/progress.md` | Generator の引き渡し事項 |
+| `plan/domain.json` (任意・Phase Z11.0+) | `business_rule_conflict` の regex 構築 source (`endpoints[].messages[].literal`) + `scenario_unavailable` の health check literal source (`named_states[].health_check`)・存在時のみ Read |
 | `plan/test-design/contracts/isolation_contract.json` | orchestrator 算出 (isolation_pairs[] 集計用) |
 | `plan/feedback/sprint-N/AC-*.json` | per-AC artifact 群 (verdict / scores_local / findings / design.scenarios / test_artifact.artifact_framework を集約) |
 | `plan/feedback/sprint-N/_smoke.json` | pre-smoke 結果 (verdict 計算と smoke_tests[] 転記の source) |
@@ -53,8 +55,8 @@ model: sonnet
 4. **Multi-runner 結果集計 (Phase Z5)**: `tests_run[]` を per-AC JSON の `tests_run_local[]` を転記する形式で組み立てる (AC-10):
    - **全 AC**: `plan/feedback/sprint-N/AC-K.json` の `self_execution_result` を一次集約源として使用 (`<SUT root>/evidence/results.json` の直接 Read は廃止・AC-9)
    - **Playwright AC** (`test_artifact.artifact_framework == "F-playwright-ts"`): per-AC JSON の `tests_run_local[]` を転記。`self_execution_result.exit_code` で pass/fail 判定。evidence は `evidence/AC-K/test-results/` 配下
-   - **Bash AC** (`F-bash-script` / `F-sql-with-bash-wrapper`): per-AC JSON の `tests_run_local[]` を転記。`self_execution_result.exit_code` で pass/fail 判定
-   - 統一 schema `{type, file, ac_id, passed, duration_ms, error_excerpt}` で push (Playwright と bash 混在 OK)
+   - **Bash 系 AC** (`F-http-request-curl` (Phase Z5+) / `F-bash-script` / `F-sql-with-bash-wrapper`): per-AC JSON の `tests_run_local[]` を転記。`self_execution_result.exit_code` で pass/fail 判定。`F-http-request-curl` も bash runner で実行されるため `F-bash-script` と同 dispatch path
+   - 統一 schema `{type, file, ac_id, passed, duration_ms, error_excerpt}` で push (Playwright と bash 系混在 OK・`type` 値: `"playwright"` / `"http_curl"` / `"bash"` / `"sql_bash"` を artifact_framework から導出)
 5. **fix_target 補正 routing (A' 規約)**: per-AC `findings[].fix_target` が `"implementation"` でも以下に該当する場合は **`"test_spec"` に強制 routing** (退化的修正排除):
    - suggested_fix に「source の HTML 属性 (maxlength/pattern/required/min/max/type/aria-*) 削除/緩和」が含まれる
    - 「source の server-side validation constraint (言語・framework 固有の validation annotation / decorator / rule 等) の削除/緩和」 (具体 annotation 例は `evaluator-html-attribute-bypass.md` catalog 参照)
@@ -71,16 +73,16 @@ model: sonnet
    - 全 per-AC JSON の `ac_operations[]` を `jq '.ac_operations | length'` で確認・空または `summary` 欠落は `issue_type: "missing-ac-operations" / "missing-ac-operations-summary"` で起票
    - 詳細 grep template は `.claude/references/evaluator-aggregator-output-spec.md` 参照
 
-6.5. **Test Runner error 分類 (Phase Z4-S2・新規)**: Test Runner (`results.json` / `evidence/AC-*-result.log` + `AC-*-exit-code`) の error を **deterministic regex で 5 値分類**し、`failure_mode_signal` 付きの `findings[]` を起票する。
+6.5. **Test Runner error 分類 (Phase Z4-S2 / Phase Z9 拡張)**: Test Runner (`results.json` / `evidence/AC-*-result.log` + `AC-*-exit-code`) の error を **deterministic regex で 8 値分類**し、`failure_mode_signal` 付きの `findings[]` を起票する (Phase Z9 で `business_rule_conflict` / `scenario_unavailable` / `fixture_bug` を追加)。
 
 **分類 source (Phase Z5)**:
 
 - Playwright AC (`F-playwright-ts`): per-AC JSON `self_execution_result.stderr_excerpt` / `self_execution_result.exit_code` から error message を抽出 (旧 `evidence/results.json` は廃止・per-AC が self-execution 済み)
-- Bash AC (`F-bash-script` / `F-sql-with-bash-wrapper`): per-AC JSON `self_execution_result.stderr_excerpt` + `self_execution_result.exit_code`
+- Bash 系 AC (`F-http-request-curl` / `F-bash-script` / `F-sql-with-bash-wrapper`): per-AC JSON `self_execution_result.stderr_excerpt` + `self_execution_result.exit_code` (Phase Z5+ で F-http-request-curl も同 dispatch)
 
 **分類 regex (project 非依存・Playwright/Node.js/bash standard error のみ)**:
 
-> **single source of truth**: regex catalog の正本は `.claude/references/evaluator-per-ac-retry-protocol.md` §(d)。本ファイルの以下の表は参照コピー。追加・修正は retry-protocol.md 側を先に更新し本表と同期すること (drift 防止・AC-6 / AC-15)。
+> **single source of truth**: regex catalog の正本は `.claude/references/evaluator-per-ac-retry-protocol.md` §(d)。本ファイルの以下の表は参照コピー。追加・修正は retry-protocol.md 側を先に更新し本表と同期すること (drift 防止規約)。
 
 | 検出 pattern (regex) | failure_mode_signal | 同時付与する fix_target | severity |
 |---|---|---|---|
@@ -91,25 +93,32 @@ model: sonnet
 | `expect\(.*\)\.toHave(Text\|Value)` 値不一致 | `spec_violation` | `implementation` | major |
 | HTTP status mismatch (`expect.*\.status\(\)` で `\d{3}` 不一致) | `spec_violation` | `implementation` | major |
 | `.design.expected_failures[]` の literal が実行出力に出現しない (bash AC は stderr / Playwright AC は network error log で確認) | `spec_violation` | `implementation` | major |
+| **(Phase Z9+ / Z11.0 source 更新)** test が happy path (test_case.expected.http.status 成功系) として書かれた + stderr / response body に **`domain.json#endpoints[].messages[].literal` を ID 正規化 (`\d+` 等) して構築した regex** が match | `business_rule_conflict` | `spec` (sprint.json test_case.state 見直し) | major |
+| **(Phase Z9+)** scenario factory health check が fail (`scenario-factory-health-check-failed` keyword in stderr / per-AC blocker.reason) | `scenario_unavailable` | `implementation` (Generator が factory を修正) | critical |
+| **(Phase Z9+)** test setup phase (test body 開始前) で fixture / seed loader / migration error (`fixture` / `seed` / `migration` keyword + non-zero exit before first assertion) | `fixture_bug` | `test_spec` (test 側の fixture 設定修正) | major |
 | `EADDRINUSE` / `Browser launch failed` / `Page closed` (test 開始前) / `Connection refused` | `environment_failure` | `infrastructure` | critical |
 | bash `exit_code == 127` (command not found) / `: command not found` in stderr | `environment_failure` | `infrastructure` | critical |
 | per-AC が halt した `blocker.reason: "route-not-in-route-map"` / `"capability-not-available: ..."` / `"required-input-missing: ..."` | `data_unavailable` | (前段 Step 戻し) | critical |
 | 上記いずれの regex にも合致しない | `unclassified` (= 省略) | (既存 `fix_target` で fallback) | per-AC 申告通り |
+
+**Phase Z9 / Z11.0 `business_rule_conflict` 検出の前処理**: `domain.json#endpoints[].messages[].literal` を deterministic 正規化 (数値 token → `\d+` / 引用符内文字列 → `["'][^"']*["']` / 連続空白 → `\s+`) して regex 構築。LLM 推論禁止。詳細は retry-protocol.md §(d) 参照。
+
+**検出不能な signal の扱い**: SPEC_AMBIGUOUS / FLAKY は単 1 run + deterministic regex では検出不能のため本表に**追加しない** (`unclassified` に fallback)。LLM 推論経路を開かないため。
 
 **生成する finding entry の形式** (Phase Z4-S2):
 
 ```json
 {
   "id": "<aggregator 全体再番号>",
-  "fix_target": "implementation | test_spec | infrastructure",
-  "failure_mode_signal": "test_script_bug | spec_violation | environment_failure | data_unavailable",
+  "fix_target": "implementation | test_spec | infrastructure | spec",
+  "failure_mode_signal": "test_script_bug | spec_violation | business_rule_conflict | scenario_unavailable | fixture_bug | environment_failure | data_unavailable | noise",
   "severity": "critical | major | minor",
   "ac_id": "AC-K",
   "summary": "<1 行サマリ>",
   "evidence_excerpt": "<Test Runner error の literal 抜粋・300 char 以内>",
   "classification_evidence": {
     "matched_pattern": "<分類に使った regex pattern>",
-    "source": "per-AC JSON self_execution_result.stderr_excerpt | self_execution_result.exit_code",
+    "source": "per-AC JSON self_execution_result.stderr_excerpt | self_execution_result.exit_code | domain.json#endpoints[].messages[].literal",
     "deterministic": true
   },
   "suggested_fix": "<failure_mode_signal 別の汎用 hint>"
@@ -143,7 +152,7 @@ done
    - 全 AC `regressions_local` 空 + pre-smoke 成功 → 5
    - minor のみ → 4 / major 1 件以上 → 2 / 中間 → 3
 8. **evidence 集計** (intermediate / final 共通・Phase X2+Z2+Z5):
-   - spec.md から全 AC を抽出
+   - `plan/sprint.json#test_cases[].id` から全 AC を抽出 (Phase Z11.0+・sprint.json 不在時のみ spec.md fallback)
    - 各 per-AC JSON の `design.scenarios[].tc_id` を Read して TC-id 集合を抽出
    - **artifact_framework 別**:
      - Playwright AC: `cd <SUT root> && find evidence/AC-K/test-results -type d -name "*TC-AC-K-Sn*"` で実 dir 取得 (Phase Z5: --output per-AC 分離)。存在しない場合は `evidence -type d -name "*TC-AC-K-Sn*"` にフォールバック

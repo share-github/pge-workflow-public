@@ -60,7 +60,7 @@ v1 は `1 app : N DataSource` (SUT 側 multi-datasource routing 実装に依存)
 | `datasource_env_name` | **必須**。AskUserQuestion で「PJ の framework 公式 docs に基づき SUT が baseline で DB 接続 URL を受け取っている env name を declare してください (= 同名 env に clone URL を上書き渡しする)」と提示・本 SKILL に framework 別 literal を hardcode しない |
 | `env` | 任意・追加 env・配列形式 `["KEY=VALUE", ...]`。AskUserQuestion で「container 起動時に `datasource_env_name` 以外で必須となる env はありますか? (framework の profile / runtime mode / feature flag 等)」を聞き、空でも OK |
 
-### Step 3: test_runner section の決定 (v1 と同じ)
+### Step 3: test_runner section の決定 (v1 + Phase Z3+ noise_filter 追加)
 
 | field | 取得方法 |
 |---|---|
@@ -70,6 +70,11 @@ v1 は `1 app : N DataSource` (SUT 側 multi-datasource routing 実装に依存)
 | `config_path` | install_dir からの relative path |
 | `test_dir` | config file を Read して `testDir` / `roots` 設定から取得 |
 | `browsers` | Playwright `projects` 設定から取得・default `["chromium"]` |
+| `fixtures_module_path` | default `.pge-fixtures` (SUT root 直下)・AskUserQuestion で「Playwright fixture module (`.pge-fixtures` 系) を SUT root 以外に配置しているなら relative path を declare してください (monorepo / 別 package 配下のとき)」と提示 |
+| `noise_filter.network_abort[]` | default `[]` (空配列・何も block しない)・PJ owner に「E2E 実行時に block したい network request pattern (favicon / analytics / HMR endpoint 等の dev 環境ノイズ) が任意で declare 可能。常識的に block すべき汎用 pattern は `["**/favicon.ico"]` 1 件のみ提案」と AskUserQuestion |
+| `noise_filter.console_suppress_pattern` | default `""` (空文字・何も suppress しない)・PJ owner に「console.log/warn に出現する HMR / vite / dev hot reload の noise を suppress する正規表現 (1 本) を任意で declare 可能。例: `\\[HMR\\]\|\\[vite\\]\|sourcemap`」と AskUserQuestion |
+
+noise_filter の値は orchestrator が `.pge-fixtures.ts` に literal 注入する (詳細は [`.claude/references/playwright-fixture-template.md`](../../references/playwright-fixture-template.md))。PJ 固有 endpoint を block しないよう注意 (test 本質が壊れる)。
 
 ### Step 4: parallel_db section の決定 (v2 簡略化)
 
@@ -118,6 +123,50 @@ v1 は `1 app : N DataSource` (SUT 側 multi-datasource routing 実装に依存)
 
 - default `"PGE_ISOLATION_MODE"` (FW 規約)
 
+### Step 4.6: regressive_fix_scan section の決定 (Phase Z9+ 新規)
+
+Generator 4.6-A の退化的修正 self-check が grep で消費する **PJ 別 pattern catalog** を declare する。本 SKILL に stack-specific literal (Java annotation / Python decorator 等) を hardcode せず、SUT を probe + AskUserQuestion で 1 group ずつ collect する。
+
+#### 4.6-1: SUT probe (file extension + annotation token 抽出)
+
+1. SUT root 配下を file extension で listing (`find <sut_root> -maxdepth 6 -type f -name '*.<ext>'` を列挙)・stack を機械検出
+2. 検出した extension に対し、**generic な annotation token regex** で SUT 内の使用箇所を grep (例: `@[A-Z][a-zA-Z]+\s*\(` のような汎用 token・本 SKILL に specific annotation 名を書かない):
+   - 検出件数を「`<extension>: <unique_token_count>` 件」形式で集計
+3. 件数 0 件の extension は本 step を skip (= scan group に追加しない)
+
+#### 4.6-2: group ごとの declare
+
+検出された extension 集合に対し、AskUserQuestion で以下を 1 group ずつ確認:
+
+```
+question: "[<group description>] SUT 内で grep した結果、以下の generic token pattern が検出されました。退化的修正 detect 対象 group として `regressive_fix_scan.groups[]` に追加しますか?"
+options:
+  - label: "追加 (推奨 default を使う)"
+    description: "<集計結果>"
+  - label: "追加 (regex を手動で declare)"
+    description: "PJ owner が file_globs[] + removed_token_regex を手入力"
+  - label: "skip"
+    description: "本 group は scan しない (PJ CI / lint で代替検知している場合等)"
+```
+
+各 group の field:
+
+| field | 取得方法 |
+|---|---|
+| `id` | AskUserQuestion で「短い group identifier (lowercase + hyphen のみ・例: `client-view` / `server-validation` / `auth-decorator`)」を確認 |
+| `description` | AskUserQuestion で「このグループが保護する規約の 1 行説明」を確認 |
+| `file_globs` | 検出 extension から `["*.<ext1>", "*.<ext2>"]` 形式に組み立てて AskUserQuestion で確認 (追加 / 削除可) |
+| `removed_token_regex` | **PJ owner が手入力**・SUT 内で grep した unique token list を AskUserQuestion で提示し、保護対象の regex を 1 本に組み立てて declare させる (本 SKILL に specific annotation 名を hardcode しない・LLM 推論で値を fabricate しない) |
+
+#### 4.6-3: 集約
+
+declare された全 group を `regressive_fix_scan.groups[]` に push。1 件も declare されなかった場合は空配列 `[]` (= 退化的修正 detect は dis-armed・generator.md 4.6-A は warning log で skip)。
+
+#### 4.6-4: 失敗時 / skip 時
+
+- PJ owner が「本 self-check は不要」と判定した場合 → 全 group を skip → 空配列で生成 (= dis-armed)
+- PJ owner が想定する pattern が SUT に 1 件も grep 不能な場合 → 該当 group を skip + 警告ログ表示
+
 ### Step 5: 既存 schema v1 config の検出と移行案内
 
 PJ root の `plan/pge-runtime-config.json` が `schema_version: "1"` のとき:
@@ -161,7 +210,22 @@ PJ root の `plan/pge-runtime-config.json` が `schema_version: "1"` のとき:
     "install_dir": "<absolute path>",
     "config_path": "<relative to install_dir>",
     "test_dir": "<relative to install_dir>",
-    "browsers": ["<browser>", ...]
+    "browsers": ["<browser>", ...],
+    "fixtures_module_path": "<SUT root relative path・default '.pge-fixtures'>",
+    "noise_filter": {
+      "network_abort": ["<glob or regex pattern>", "..."],
+      "console_suppress_pattern": "<regex pattern (single string)・空文字なら何も suppress しない>"
+    }
+  },
+  "regressive_fix_scan": {
+    "groups": [
+      {
+        "id": "<group identifier (lowercase + hyphen)>",
+        "description": "<1 行説明>",
+        "file_globs": ["<git diff glob>", "..."],
+        "removed_token_regex": "<grep -E に渡す regex (1 本)>"
+      }
+    ]
   },
   "parallel_db": {
     "strategy": "named-volume-clone | schema-per-ac | none",

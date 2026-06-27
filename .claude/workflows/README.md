@@ -8,13 +8,13 @@ PGE (Planner-Generator-Evaluator) を Claude Code の **Workflow tool** で dete
 |---|---|---|
 | [`pge-sprint-cycle.js`](pge-sprint-cycle.js) | sprint full cycle: Discovery → **Generator (Step 4)** → Build-Image → TI (Step 4.25) → DB-Setup → Contracts (Step 4.5) → Pre-smoke → Per-AC batch (Step 5-B) → Auditor → Aggregator → Reviewer (Step 7) → Routing (Step 8) → DB-Dispose。`while` loop で changes_requested → generator_retry を cycle closure | `/pge-sprint-cycle` (saved) |
 
-注: Step 1 (Researcher) + Step 2 (Planner) + Step 3 (人間承認 FB loop) は **Phase Z8 で `.claude/skills/pge-planning/SKILL.md` (Skill 版) に移行**。Workflow 実行中の対話を前提にしない設計にするため、FB loop dialogue を Skill 内で完結させる構造に変更した。
+注: Step 1 (Researcher) + Step 2 (Planner) + Step 3 (人間承認 FB loop) は **Phase Z8 で `.claude/skills/pge-planning/SKILL.md` (Skill 版) に移行**。Workflow tool は mid-run user input 不可のため FB loop dialogue を Skill 内で完結させる構造に変更した (公式 best practice 適合)。
 
 phase 一覧の正本は `pge-sprint-cycle.js` 冒頭の `meta.phases` (= /workflows の progress 表示と完全一致)。本 README には載せず一次資料 1 箇所に集約する。
 
 ## 設計原則
 
-1. **実行中の人間承認を workflow 内に閉じ込めない**: 承認や差し戻しを要する planning (Step 1-3) は Skill (`/pge-planning`) で完結し、本 workflows/ 配下には機械的 fan-out の sprint cycle のみが残る。
+1. **mid-run user input 不可** ([公式 docs](https://code.claude.com/docs/en/workflows.md#behavior-and-limits)): 「For sign-off between stages, run each stage as its own workflow」。**human gate を要する planning (Step 1-3) は Skill (`/pge-planning`) で完結**し、本 workflows/ 配下には機械的 fan-out の sprint cycle のみが残る。
 2. **routing は code で表現**: SKILL.md の text routing 表は **document**、本 workflow の `if`/`switch` が **enforcement**。LLM 解釈の余地ゼロ。
 3. **agent 定義は変更しない**: `.claude/agents/<name>.md` をそのまま `agentType` opt で reuse。workflow は dispatcher のみ。
 4. **schema 拘束**: 各 agent return を JSON schema で validation。Phase Z5 で観測した「半 populated return」は runtime auto-retry で構造的に防止。
@@ -137,8 +137,8 @@ baseline DB だけは workflow の管轄外 (= clone 元として存在するこ
 
 bare host runner / CI runner container 等の他 pattern は将来検証 / `access_mode` field opt-in 拡張で対応見込み。
 
-## 関連資料
+## 設計参照
 
-- Claude Code: [Workflows](https://code.claude.com/docs/en/workflows.md) / [Sub-agents](https://code.claude.com/docs/en/sub-agents.md)
+- 公式: [Workflows](https://code.claude.com/docs/en/workflows.md) / [Sub-agents](https://code.claude.com/docs/en/sub-agents.md)
 - 移行根拠: [issue/20260614/O-4](../../issue/20260614/O-4-orchestrator-asks-human-instead-of-generator-retry.md)
 - 既存 PGE 規約: [pge-planning SKILL](../skills/pge-planning/SKILL.md) / [pge-sprint-cycle workflow](pge-sprint-cycle.js) / 各 [agent.md](../agents/)

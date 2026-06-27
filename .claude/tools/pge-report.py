@@ -5,7 +5,8 @@ Reads PGE artifacts and generates a single-file HTML report with
 AC-by-AC view, evidence thumbnails, and click-to-zoom lightbox.
 
 Inputs:
-  - plan/spec.md                                   (AC descriptions)
+  - plan/sprint.json                               (AC 一覧 = test_cases[]・Phase Z11+ 一次 source)
+  - plan/spec.md                                   (sprint.json 不在時の legacy fallback)
   - plan/feedback/<name>.json                      (verdict / scores / ac_coverage / findings・
                                                     D-4: narrative と bugs は findings[] から機械導出)
   - <attachments_dir> per ac_coverage[] entry      (= <SUT root>/evidence/<test>/ 配下の attachments・
@@ -80,6 +81,44 @@ def parse_spec_acs(spec_text: str):
         )
     # Sort by AC number
     acs.sort(key=lambda x: int(x["ac_id"].split("-")[1]))
+    return acs
+
+
+def _ac_sort_key(ac_id: str) -> int:
+    """AC-N の N を返す (非数値は 0)。"""
+    parts = ac_id.split("-")
+    return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+
+
+def load_acs_from_sprint(sprint_json: dict):
+    """Return list of {ac_id, category, when_text} from sprint.json#test_cases (Phase Z11+).
+
+    spec.md の AC 行 parse を置き換える。Z11.1 以降 spec.md は thin pointer のため
+    AC 一覧は機械可読な sprint.json#test_cases[] を一次 source にする。
+      - ac_id      = test_cases[].id (AC-N)
+      - category   = 親 requirement_id (test_cases を requirement 単位で filter/トレース)
+      - when_text  = test_cases[].label + trigger(method path) で human-readable 説明
+    domain.json は不要 (test_case が trigger を内包するため自己完結)。
+    """
+    acs = []
+    for tc in sprint_json.get("test_cases", []) or []:
+        ac_id = tc.get("id")
+        if not ac_id:
+            continue
+        label = (tc.get("label") or "").strip()
+        trig = tc.get("trigger") or {}
+        method = (trig.get("method") or "").strip()
+        path = (trig.get("path") or "").strip()
+        trig_str = " ".join(p for p in (method, path) if p)
+        when_text = f"{label}（{trig_str}）" if trig_str else label
+        acs.append(
+            {
+                "ac_id": ac_id,
+                "category": tc.get("requirement_id") or "?",
+                "when_text": when_text,
+            }
+        )
+    acs.sort(key=lambda x: _ac_sort_key(x["ac_id"]))
     return acs
 
 
@@ -956,20 +995,28 @@ def main():
     output = Path(args.output).resolve() if args.output else attachments_root / "report.html"
 
     spec_path = plan_dir / "spec.md"
+    sprint_path = plan_dir / "sprint.json"
     json_path = plan_dir / "feedback" / f"{args.feedback}.json"
 
-    missing = [p for p in [spec_path, json_path] if not p.exists()]
-    if missing:
-        for p in missing:
-            print(f"ERROR: missing input: {p}", file=sys.stderr)
+    # feedback json は必須。AC 一覧 source は sprint.json 優先 (Phase Z11+)・無ければ spec.md fallback。
+    if not json_path.exists():
+        print(f"ERROR: missing input: {json_path}", file=sys.stderr)
         sys.exit(2)
-
-    spec_text = spec_path.read_text(encoding="utf-8")
     feedback_json = json.loads(json_path.read_text(encoding="utf-8"))
 
-    acs = parse_spec_acs(spec_text)
+    if sprint_path.exists():
+        sprint_json = json.loads(sprint_path.read_text(encoding="utf-8"))
+        acs = load_acs_from_sprint(sprint_json)
+        ac_source = "sprint.json#test_cases"
+    elif spec_path.exists():
+        acs = parse_spec_acs(spec_path.read_text(encoding="utf-8"))
+        ac_source = "spec.md (legacy)"
+    else:
+        print(f"ERROR: AC source なし: {sprint_path} も {spec_path} も存在しない", file=sys.stderr)
+        sys.exit(2)
+
     if not acs:
-        print("ERROR: no ACs parsed from spec.md", file=sys.stderr)
+        print(f"ERROR: no ACs parsed from {ac_source}", file=sys.stderr)
         sys.exit(3)
 
     # D-4 規約: MD 廃止に伴い JSON 直読で narratives / bugs を導出

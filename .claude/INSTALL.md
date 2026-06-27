@@ -31,7 +31,7 @@ cp "$SRC/.mcp.json" "$DST/"
 | ファイル | 既存あり時の対応 |
 |---|---|
 | `.mcp.json` | `mcpServers` 内に `playwright` entry を merge |
-| `.claude/agents/<同名>.md` | 既存が PGE agent と衝突する場合は退避して PGE 版を採用するか、機能 merge する |
+| `.claude/agents/<同名>.md` | 公式 docs より project agent が precedence・既存が PGE agent と衝突する場合は退避して PGE 版を採用するか、機能 merge する |
 | `.claude/skills/<同名>/` | 同上 |
 | `CLAUDE.md` | **merge 不要** (本 repo の CLAUDE.md は framework 改修者向け instruction で、PGE を使うだけの他 PJ には不要)。target 既存 CLAUDE.md にも追記不要 |
 

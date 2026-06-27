@@ -290,27 +290,67 @@ line_count=$(wc -l < "/tmp/${PREFIX}-output.csv")
 [ "$line_count" -ge 1 ] || { echo "FAIL: empty output"; exit 1; }
 ```
 
+### O-html-content (Phase Z5+)
+
+**用途**: server-rendered HTML response の text / element 観測 (browser 不要・curl で取得した HTML response body を bash text tool で検証)。`O-stdout-pattern` の generic な行 grep より HTML semantic に踏み込んだ verification を表現する (xmllint / pup / htmlq による element-aware 検証も含む)。
+
+**available 条件** (investigator phase 2 が判定):
+- `T-http-request-curl` available AND
+- `_framework.json#view_engine_type ∈ {"server-side-template", "mixed"}` (= Thymeleaf / JSP / ERB / Jinja2 / Blade 等の server-side template engine 検出)
+
+SPA (`view_engine_type == "spa"`) では HTML response が空 shell (e.g. `<div id="root"></div>`) のため本 capability は `available: false` とし、Playwright 経路 (`O-dom-content` 等) を使う。
+
+**literal 例 (bash)** — text 単純包含:
+```bash
+curl -s -o "/tmp/${PREFIX}-response.html" -w '%{http_code}' "${APP_BASE_URL}/<list route>" > /tmp/${PREFIX}-status
+status=$(cat /tmp/${PREFIX}-status)
+[ "$status" -eq 200 ] || { echo "FAIL: status=$status"; exit 1; }
+grep -qF "<expected text literal from spec>" "/tmp/${PREFIX}-response.html" \
+  || { echo "FAIL: expected text missing in HTML"; exit 1; }
+```
+
+**literal 例 (bash + xmllint)** — element-aware (任意・xmllint 利用可能時):
+```bash
+text=$(xmllint --html --xpath 'string(//*[@aria-label="<aria-label literal>"])' \
+  "/tmp/${PREFIX}-response.html" 2>/dev/null)
+[ "$text" = "<expected literal>" ] \
+  || { echo "FAIL: aria-label content mismatch (got: $text)"; exit 1; }
+```
+
+**注意**: `xmllint --html` は invalid HTML でも parse を試みるが厳密検証にはならない。確実性が必要な AC では `grep -qF` の literal 包含で十分なケースが多い・element-aware が必要 (e.g. ARIA tree / role 階層) なら Playwright (`O-aria-tree`) を選ぶ判断軸を残す。
+
 ---
 
 ## 3. Artifact Framework Decision (機械的導出表)
 
-evaluator per-ac は `design.trigger_capabilities[]` + `design.observation_capabilities[]` の組み合わせから **artifact_framework** を以下の表で機械的に決定する。LLM 推論ではなく **decision logic**:
+evaluator per-ac は `design.trigger_capabilities[]` + `design.observation_capabilities[]` の組み合わせから **artifact_framework** を以下の表で機械的に決定する。LLM 推論ではなく **decision logic** (上から順に評価・最初に match した branch を採用):
 
 ```
-使用 capability に Playwright 系 (T-browser-navigate / T-http-request-playwright /
-                                 O-dom-* / O-aria-tree / Playwright の O-http-*) が
-1 件でも含まれる
+(1) browser-essential capability (T-browser-navigate / T-http-request-playwright /
+    O-dom-content / O-dom-locator-visible / O-aria-tree) が 1 件でも含まれる
    → artifact_framework = "F-playwright-ts"
+   (Phase Z5+: 「真に browser engine 必須な AC のみ」採用・SPA / client-side JS /
+    ARIA live region / focus / animation / visual 観測が AC の本質要素である場合に限る)
 
-使用 capability に Playwright 系が含まれず・bash 系 capability のみ
+(2) (1) に当たらず・HTTP capability (T-http-request-curl + O-http-status /
+    O-http-response-shape / O-html-content のいずれか) を含む
+   → artifact_framework = "F-http-request-curl"
+   (Phase Z5+ 新規・default 経路・curl で HTTP response を取得し bash + grep / jq /
+    xmllint で検証・browser 不要のため per-AC eval が ~1-2s/test と高速)
+
+(3) (1)(2) に当たらず・T-sql-execution を含む (SQL 検証主体)
+   → artifact_framework = "F-sql-with-bash-wrapper"
+
+(4) いずれにも当たらず・bash 系 capability のみ (T-shell-command / T-file-creation /
+    O-exit-code / O-stdout-pattern / O-stderr-pattern / O-log-line-pattern /
+    O-file-existence / O-file-content のみ)
    → artifact_framework = "F-bash-script"
 
-使用 capability に T-sql-execution が含まれ・Playwright 系も含む
-   → artifact_framework = "F-playwright-ts" (内部で psql を child_process / spawn で呼ぶ)
-
-使用 capability に T-sql-execution が含まれ・Playwright 系が含まれない
-   → artifact_framework = "F-bash-script" (内部で psql を直接呼ぶ)
+(5) 上記いずれも不可 (Playwright 系も HTTP 系も bash 系も SQL 系も全て unavailable)
+   → halt: blocker.reason: "no-viable-artifact-framework"
 ```
+
+**Phase Z5+ 変更点**: branch (2) を新設し、F-http-request-curl を **default 経路**にした。旧 Phase Z2 では HTTP-only AC が `F-bash-script` に丸められていたが、artifact_framework として独立識別することで aggregator / mechanical check / failure diagnosis が HTTP 特化処理を行える。**「browser engine 必須な要素 (= JS interaction / CSS / animation / ARIA live region 等) が AC に含まれるか」が (1) vs (2) の判定基準**。
 
 ---
 
@@ -322,21 +362,23 @@ evaluator per-ac は `design.trigger_capabilities[]` + `design.observation_capab
 
 **runner_command**: `cd <SUT root> && npx playwright test e2e/sprint-N/AC-K.spec.ts --reporter=json --output evidence/acK/test-results` (acK = AC-K を lowercase+ハイフン除去。例: AC-3 → ac3)
 
-**構造テンプレ**:
+**構造テンプレ** (Phase Z3+: `.pge-fixtures.ts` import 必須):
 
 ```typescript
-import { test as base, expect, request } from '@playwright/test';
+// Phase Z3+: PGE fixture fragment を import (auto:true で noise filter / network abort が適用される)
+// 詳細規約は .claude/references/playwright-fixture-template.md を参照
+import { test as baseTest, expect } from '<相対 path>/.pge-fixtures';
 
 // Universal Invariant I1: per-AC PREFIX (cross-AC isolation)
 const PREFIX = `e2e-ac-K-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 // Universal Invariant I3: design.expected_failures[] literal 引用 (発明禁止)
 const expectedFailures: { urlPattern: RegExp; status: number }[] = [
-  // 例: { urlPattern: /favicon\.ico$/, status: 404 },
+  // (例示は v3 で削除済・per-AC が design.expected_failures[] を literal echo する)
 ];
 
-// negative observation fixture (silent failure 検出)
-const test = base.extend<{ negativeObservation: void }>({
+// negative observation fixture (silent failure 検出・per-AC の expectedFailures を closure capture)
+const test = baseTest.extend<{ negativeObservation: void }>({
   negativeObservation: [async ({ page }, use, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
@@ -380,17 +422,21 @@ test('TC-AC-K-S1: <design.scenarios[0].title 引用>', async ({ page }, testInfo
   };
 
   // ac_operations[] の各 step に対応する Playwright 操作 + await shot(label) を順に配置
-  // 使用 capability に応じて T-browser-navigate / T-http-request-playwright / O-dom-content 等を inline
+  // ⚠️ locator は locator_catalog.json#by_element_id[IE-N].selected.selector_literal を **literal echo** (LLM が selector を発明禁止・詳細は test-investigator-phase3-schemas.md)
+  // ⚠️ assertion は web-first only (.toBeVisible() / .toHaveText() / .toHaveValue() 等)・.textContent() / .innerText() 等の snapshot 系は禁止 (mechanical check で検出)
 });
 
 test('TC-AC-K-S2: <negative scenario>', async ({ page }, testInfo) => { /* ... */ });
 ```
 
 **Playwright 専用規約**:
+- **import は `.pge-fixtures` から `test as baseTest, expect`** 必須 (`@playwright/test` 直接 import は Phase Z3+ で禁止・mechanical check で検出)。`<相対 path>` は artifact の配置位置から SUT root への relative path (例: `e2e/sprint-N/AC-K.spec.ts` なら `'../../.pge-fixtures'`)
 - `shot()` は **arrow function 形式** (`const shot = async (...) =>`) 必須 (D-1 規約・auditor grep 誤検出回避)
 - screenshot 出力は `testInfo.outputPath()` 経由のみ (Phase X2 規約・`e2e/artifacts/` 等への独立書き込み禁止)
 - `label` は ASCII 推奨 (`form-loaded` / `after-submit` 等・日本語は cross-platform 問題)・日本語サマリは `ac_operations[].summary` に書く
 - shot 呼び出し回数 == `max(ac_operations[].step)` (mechanical check)
+- **locator は locator_catalog.json#by_element_id[IE-N].selected.selector_literal を literal echo** (LLM 推論で selector を発明禁止・Phase Z3+)
+- **assertion は web-first only**: `toBeVisible()` / `toHaveText()` / `toHaveValue()` / `toHaveURL()` / `toHaveAttribute()` 等の auto-wait assertion のみ許可・`.textContent()` / `.innerText()` / `Promise.race()` 等の snapshot/timing 系は禁止 (mechanical check で検出)
 
 ---
 
@@ -449,6 +495,87 @@ echo "ALL PASS AC-K"
 - `set -e` で fail-fast (1 つでも失敗したら以降の TC-id を skip して non-zero exit)
 
 ---
+
+### F-http-request-curl (HTTP integration test・browser 不要・Phase Z5+ default)
+
+**用途**: HTTP capability (T-http-request-curl + O-http-status / O-http-response-shape / O-html-content) のみで構成される AC の **default 経路**。server-rendered HTML (Thymeleaf / JSP / ERB / Jinja2 / Blade 等) のサーバ側 end-to-end integration test・JSON API contract test・redirect / status 検証 等を **browser を介さず**に **~1-2s/test** で完了する。
+
+**出力ファイル**: `e2e/sprint-N/AC-K.test.sh` (F-bash-script と同じ拡張子・但し artifact_framework enum で identify)
+
+**runner_command**: `cd <SUT root> && bash e2e/sprint-N/AC-K.test.sh` (allowlist の bash entry を再利用・Section 5 拡張不要)
+
+**構造テンプレ**:
+
+```bash
+#!/usr/bin/env bash
+# F-http-request-curl artifact (Phase Z5+)
+# AC: <AC-K の spec.md AC 節 literal>
+set -e
+
+# Universal Invariant I1: per-AC PREFIX (cross-AC isolation)
+PREFIX="e2e-ac-K-$(date +%s)-$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || echo "rnd$$")"
+SUT_ROOT="${SUT_ROOT:-$(pwd)}"
+APP_BASE_URL="${APP_BASE_URL:-<app_url from task description>}"
+
+# 共通 cleanup (curl 一時 file)
+trap 'rm -f /tmp/${PREFIX}-*.{html,json,status} 2>/dev/null || true' EXIT
+
+# Universal Invariant I3: design.expected_failures[] literal grounded (発明禁止)
+# 例: # expected_failures: GET /favicon.ico → 404 (browser default fetch・本 test では検証対象外)
+# expected_failures はノイズ除外目的・本 framework では curl 単発呼びなので副次的 (browser のような background request なし)
+
+# Universal Invariant I2: design.scenarios[].tc_id 各々を独立 function として 1:1 実装
+# TC-AC-K-S1: <design.scenarios[0].title 引用>
+test_TC_AC_K_S1() {
+  # T-http-request-curl trigger
+  status=$(curl -s -o "/tmp/${PREFIX}-response.html" -w '%{http_code}' \
+    "${APP_BASE_URL}/<route from route_map.json>")
+
+  # O-http-status observation
+  [ "$status" -eq 200 ] \
+    || { echo "FAIL TC-AC-K-S1: status=$status (expected 200)"; exit 1; }
+
+  # O-html-content observation (server-rendered HTML)
+  grep -qF "<expected text literal from spec>" "/tmp/${PREFIX}-response.html" \
+    || { echo "FAIL TC-AC-K-S1: expected text missing in HTML"; exit 1; }
+
+  echo "PASS TC-AC-K-S1"
+}
+
+# TC-AC-K-S2: <negative scenario・例: 不正 input で validation error が HTML 内に出る>
+test_TC_AC_K_S2() {
+  # POST に invalid payload を送る (server-side validation error 期待)
+  status=$(curl -s -o "/tmp/${PREFIX}-error.html" -w '%{http_code}' \
+    -X POST "${APP_BASE_URL}/<create route from route_map.json>" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "<field from validation_rule_map.json>=<invalid value>")
+
+  # O-http-status: server-side validation → 4xx or render with error
+  [ "$status" -ge 400 ] || [ "$status" -eq 200 ] \
+    || { echo "FAIL TC-AC-K-S2: unexpected status=$status"; exit 1; }
+
+  # O-html-content: validation error message が HTML 内に出る
+  grep -qF "<validation error literal from validation_rule_map.json#message>" \
+    "/tmp/${PREFIX}-error.html" \
+    || { echo "FAIL TC-AC-K-S2: validation error message missing"; exit 1; }
+
+  echo "PASS TC-AC-K-S2"
+}
+
+# 実行
+test_TC_AC_K_S1
+test_TC_AC_K_S2
+echo "ALL PASS AC-K"
+```
+
+**F-http-request-curl 専用規約**:
+- shebang `#!/usr/bin/env bash` + `set -e` 必須 (fail-fast)
+- PREFIX (I1) は `e2e-ac-K-` で始まる (cross-AC isolation・F-bash-script と共通)
+- TC-id 関数 1:1 (I2)・各関数末尾 `echo "PASS TC-AC-K-Sn"`・最終 `echo "ALL PASS AC-K"`
+- **curl 一時 file の cleanup を trap で保証** (`/tmp/${PREFIX}-*.{html,json,status}`)・per-AC isolation を担保
+- `APP_BASE_URL` は env か task description の `app_url` から取得 (`parallel_db_mode: true` 時は per-AC container URL)
+- **`page.route` / `expectedFailures` 等の browser-specific noise filter は本 framework では不要** (curl は単発 HTTP request なので favicon 等 background fetch が発生しない)
+- xmllint / pup / htmlq は **任意** (universal grep で text 包含検証が大半のケースで十分)
 
 ### F-sql-with-bash-wrapper (DB-heavy AC・Playwright 系を含まない)
 
@@ -582,6 +709,26 @@ done
 shot_count=$(grep -c "await shot(" "$file")
 max_step=$(jq '[.ac_operations[]?.step] | max // 0' "$ac_json")
 [ "$shot_count" = "$max_step" ] || { echo "shot-count-mismatch: expected=$max_step actual=$shot_count"; exit 1; }
+
+# Phase Z3+: .pge-fixtures import 必須 (@playwright/test 直接 import を禁止)
+grep -qE "from ['\"][^'\"]*\.pge-fixtures['\"]" "$file" \
+  || { echo "fixture-import-missing: import { test, expect } from '<relpath>/.pge-fixtures' が見つからない"; exit 1; }
+grep -qE "from ['\"]@playwright/test['\"]" "$file" \
+  && { echo "fixture-import-violation: @playwright/test 直接 import は Phase Z3+ で禁止 (.pge-fixtures 経由必須)"; exit 1; }
+
+# Phase Z3+: web-first assertion only (snapshot/timing 系を禁止)
+for forbidden in '\.textContent\(' '\.innerText\(' 'Promise\.race\('; do
+  grep -qE "$forbidden" "$file" \
+    && { echo "web-first-assertion-violation: $forbidden は Phase Z3+ で禁止 (web-first assertion のみ許可)"; exit 1; }
+done
+
+# Phase Z3+: locator_catalog contract echo (per-AC JSON 側で機械検証済だが artifact 内でも追加 sanity check)
+# selector が design.locator_specificity[].locator と一致するか確認 (異なる selector は IE-N 由来でないため違反)
+for sel in $(jq -r '.design.locator_specificity[]?.locator // empty' "$ac_json"); do
+  # selector literal が artifact 内に literal で出現するか (escape 無しで substring match)
+  grep -qF "$sel" "$file" \
+    || { echo "locator-not-echoed: design.locator_specificity[].locator が artifact に literal 出現しない: $sel"; exit 1; }
+done
 ```
 
 ### F-bash-script 用 self-check
@@ -616,6 +763,60 @@ done
 # Bash-specific: shebang + set -e
 head -1 "$file" | grep -q "^#!/.*bash" || { echo "shebang-missing"; exit 1; }
 grep -qE "^set -e" "$file" || { echo "set-e-missing"; exit 1; }
+```
+
+### F-http-request-curl 用 self-check (Phase Z5+)
+
+```bash
+file="e2e/sprint-N/AC-K.test.sh"
+ac_json="plan/feedback/sprint-N/AC-K.json"
+
+# I1 PREFIX (F-bash-script と共通)
+grep -qE 'PREFIX="e2e-ac-K-' "$file" || { echo "I1-violation: PREFIX missing"; exit 1; }
+
+# I2 TC-id 1:1 (function declarations + comment markers・F-bash-script と共通)
+expected_count=$(jq '.design.scenarios | length' "$ac_json")
+fn_count=$(grep -cE "^test_TC_AC_K_S[0-9]+\(\)" "$file")
+[ "$expected_count" = "$fn_count" ] || { echo "I2-violation: test_* function count mismatch (expected=$expected_count actual=$fn_count)"; exit 1; }
+for tc in $(jq -r '.design.scenarios[].tc_id' "$ac_json"); do
+  grep -qE "^# $tc:" "$file" || { echo "I2-violation: comment marker for $tc missing"; exit 1; }
+done
+
+# I3 expected_failures literal (universal browser noise である favicon 等は本 framework では発生しないが、AC で意図された failure literal は echo 必須)
+jq -r '.design.expected_failures[]?.literal_value // empty' "$ac_json" | while read pat; do
+  [ -z "$pat" ] && continue
+  grep -qF "$pat" "$file" || { echo "I3-violation: expected_failure literal '$pat' missing"; exit 1; }
+done
+
+# I4 self-assertion (FAIL message per TC-id)
+for tc in $(jq -r '.design.scenarios[].tc_id' "$ac_json"); do
+  grep -qE "FAIL $tc:" "$file" || { echo "I4-violation: no FAIL exit in $tc"; exit 1; }
+done
+
+# Bash-specific: shebang + set -e
+head -1 "$file" | grep -q "^#!/.*bash" || { echo "shebang-missing"; exit 1; }
+grep -qE "^set -e" "$file" || { echo "set-e-missing"; exit 1; }
+
+# F-http-request-curl specific (Phase Z5+)
+# curl 一時 file の cleanup trap が宣言されているか (per-AC isolation 担保)
+grep -qE "^trap .*PREFIX.*EXIT" "$file" \
+  || { echo "curl-cleanup-trap-missing: trap で curl 一時 file cleanup が宣言されていない"; exit 1; }
+
+# curl 利用が少なくとも 1 回 (本 framework の本旨)
+grep -qE "(^|[^a-zA-Z])curl " "$file" \
+  || { echo "curl-invocation-missing: F-http-request-curl artifact に curl 呼び出しが含まれない"; exit 1; }
+
+# APP_BASE_URL の利用 (literal URL hardcode 禁止)
+grep -qE 'APP_BASE_URL=' "$file" \
+  || { echo "app-base-url-missing: APP_BASE_URL declare が見つからない (literal URL hardcode 禁止)"; exit 1; }
+grep -qE 'curl[^|]*"\$\{?APP_BASE_URL\}?' "$file" \
+  || { echo "app-base-url-not-used: curl 呼び出しで APP_BASE_URL 変数参照が見つからない"; exit 1; }
+
+# Playwright 系 token を含まないこと (browser-essential AC は F-playwright-ts へ・F-http-request-curl では禁止)
+for forbidden in 'page\.goto' 'page\.locator' 'getByRole' 'getByLabel' 'pgeFixtures' 'playwright'; do
+  grep -qE "$forbidden" "$file" \
+    && { echo "browser-token-violation: $forbidden は F-http-request-curl で禁止 (browser-essential なら F-playwright-ts へ)"; exit 1; }
+done
 ```
 
 ---

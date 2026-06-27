@@ -106,6 +106,8 @@ escalation 後の新 teammate も **自身の Step 9/10 の self-execution + ret
 
 **single source of truth**: 本ファイルの定義を `evaluator-per-ac.md` (Step 9) と `evaluator-aggregator.md` (Step 6.5) の両者が参照する。二重定義禁止。
 
+Phase Z9 で `business_rule_conflict` / `scenario_unavailable` / `fixture_bug` の 3 値を新規追加 (Discovery 連携)。
+
 | 検出 pattern (regex) | failure_mode_signal | 同時付与する fix_target | severity |
 |---|---|---|---|
 | `strict mode violation` (Playwright) | `test_script_bug` | `test_spec` | major |
@@ -115,10 +117,42 @@ escalation 後の新 teammate も **自身の Step 9/10 の self-execution + ret
 | `expect\(.*\)\.toHave(Text\|Value)` 値不一致 | `spec_violation` | `implementation` | major |
 | HTTP status mismatch (`expect.*\.status\(\)` で `\d{3}` 不一致) | `spec_violation` | `implementation` | major |
 | `.design.expected_failures[]` の literal が実行出力に出現しない (bash AC は stderr / Playwright AC は network error log で確認) | `spec_violation` | `implementation` | major |
+| **(Phase Z9+ / Z11.0 source 更新)** test が happy path (test_case.expected.http.status が成功系で `expected_failures[]` に該当しない) として書かれた + stderr / response body に **`domain.json#endpoints[].messages[].literal` の reject/validation message を ID 正規化 (`\d+` 等で abstract 化) して構築した regex** が match | `business_rule_conflict` | `spec` (sprint.json の test_case.state 選択見直し) | major |
+| **(Phase Z9+)** scenario factory health check が fail (`scenario-factory-health-check-failed` keyword in stderr / per-AC blocker.reason) | `scenario_unavailable` | `implementation` (Generator が factory を修正) | critical |
+| **(Phase Z9+)** test setup phase (test body 開始前) で fixture / seed loader / migration error (`fixture` / `seed` / `migration` keyword + non-zero exit before first assertion) | `fixture_bug` | `test_spec` (test 側の fixture 設定修正) | major |
 | `EADDRINUSE` / `Browser launch failed` / `Page closed` (test 開始前) / `Connection refused` | `environment_failure` | `infrastructure` | critical |
 | bash `exit_code == 127` (command not found) / `: command not found` in stderr | `environment_failure` | `infrastructure` | critical |
+| **(Phase Z3+) noise pattern**: `favicon\.ico` / `\[HMR\]` / `\[vite\]` / `__vite_hmr` / `sourcemap` / `google-analytics` / `hotjar` / `__webpack_hmr` 系の universal dev 環境ノイズ | `noise` | (verdict 影響なし・記録のみ) | minor |
 | per-AC が halt した `blocker.reason: "route-not-in-route-map"` / `"capability-not-available: ..."` / `"required-input-missing: ..."` | `data_unavailable` | (前段 Step 戻し) | critical |
 | 上記いずれの regex にも合致しない | `unclassified` (= 省略) | (既存 `fix_target` で fallback) | per-AC 申告通り |
+
+### `business_rule_conflict` 検出の前処理 (Phase Z9・必須)
+
+`business_rule_conflict` の検出は他 signal と異なり 2 段階で動作する (deterministic regex を維持しつつ動的 ID / i18n 文言の variance を吸収する):
+
+1. **literal 正規化** (検出 regex 構築前):
+   - `plan/domain.json` を Read し `endpoints[].messages[].literal` の reject / validation message を全件抽出 (Z11.0: 旧 state-map.operations_denied.reason から source 変更)
+   - 各 message に対し以下の置換を **deterministic** に実施 (LLM 推論禁止):
+     - 数値 token (`\b\d+\b`) → `\d+`
+     - 引用符内文字列 (`"[^"]*"` / `'[^']*'`) → `["'][^"']*["']`
+     - 連続空白 → `\s+`
+   - 結果を `regex_normalized_reason` として保持
+2. **検出**: stderr / response body / Playwright trace に `regex_normalized_reason[]` の literal regex が 1 件以上 match
+3. **追加条件**: test が happy path として書かれている (per-AC JSON の `design.expected.http_status` が成功系かつ `design.expected_failures[]` に該当 status / message が無い・= sprint.json#test_cases[<id>].expected が success 系)
+4. 上記 1-3 全てを満たした test 1 件につき `failure_mode_signal: "business_rule_conflict"` を 1 件付与
+
+i18n / 単一ロケール SUT で `regex_normalized_reason[]` が空配列なら本 signal は付与不可 (= `unclassified` に fallback)。
+
+### 検出不能 signal の取り扱い (Phase Z9・参考情報)
+
+regex で deterministic に検出不能な失敗 mode は `unclassified` に fallback する。LLM 推論による分類は禁止。
+
+| 検出不能な mode | 理由 | 暫定対応 |
+|---|---|---|
+| **`spec_ambiguous`** (TODO.md の SPEC_AMBIGUOUS 相当) | spec の解釈差は cross-AC な意味推論を要し regex 不能 | `unclassified` に fallback・aggregator が手動 review で発見した場合は `findings[].issue_type: "spec-ambiguity-suspected"` を起票 |
+| **`flaky`** (TODO.md の FLAKY 相当) | 単 1 run 結果からは判定不能 (複数 run の variance 必要) | `unclassified` に fallback・将来 retry loop の variance 計測機構が入った時点で再検討 |
+
+これら 2 値は本表に**規約として追加しない** (LLM 推論経路を開かないため・deterministic 規約維持)。
 
 ### 適用規則
 
@@ -159,3 +193,26 @@ halt 時: "halt"
 ```
 
 `"9-self-execution"` の後、exit_code == 0 なら `"done"` に直行する (retry loop をスキップ)。
+
+## (f) failure_mode_signal による retry routing (Phase Z3+)
+
+per-AC 内 Step 10 の retry 最大回数と routing 先を **failure_mode_signal で機械決定**する。`fix_target` が示す責任主体に正しく escalation することで、不適切な層 (test artifact 側) で hunk patch を繰り返す無駄を排除する (Anthropic Writer/Reviewer 原則: 「作業した agent が grade しない」)。
+
+| failure_mode_signal | 内部 retry 最大 N | 行動 |
+|---|---|---|
+| `test_script_bug` | **3** (現行通り) | hunk-level minimal patch を test artifact 側に適用して retry (test artifact 自身が起因のため evaluator-per-ac が正しい修正主体) |
+| `spec_violation` | **1** (短縮) | 1 回 retry で hunk patch が test 側で吸収できるか試行。pass しなければ即 escalation で `fix_target: "implementation"` を明示 (Generator が正しい修正主体・test artifact 側で「期待値を緩める」修正は禁止) |
+| `business_rule_conflict` (Phase Z9+) | **0** (retry 不可) | retry せず即 halt: `blocker.reason: "scenario-selection-mismatch"`・**spec.md AC.scenario_ref の選択ミス**として上流 (Planner / Discovery) に戻す。test 側で期待値を緩めて pass を稼ぐのは退化的修正・禁止 |
+| `scenario_unavailable` (Phase Z9+) | **0** (retry 不可) | retry せず即 halt: `blocker.reason: "scenario-factory-health-check-failed"`・Generator が factory を修正する経路 (`fix_target: "implementation"`) |
+| `fixture_bug` (Phase Z9+) | **2** | 2 回まで fixture / seed loader の test 側設定修正で retry。pass しなければ escalation で `fix_target: "test_spec"` を明示・catalog の `creation_method` 不整合が疑われる場合は Discovery に差し戻す候補として `risk_flags_local[]` に `"fixture_bug_persistent"` を追加 |
+| `environment_failure` | **1** (短縮) | 1 回 retry で seed restore / port 解放 / 環境再 init を試行 (orchestrator 補助・要 task description の `seed_restore_command`)。pass しなければ即 halt: `blocker.reason: "environment-failure-unrecoverable"` |
+| `data_unavailable` | **0** (retry 不可) | retry せず即 halt: `blocker.reason: "data-prep-blocker-detected"`・前段 Step (Step 0-h data_prep / TI Phase 2 capability) 戻し |
+| `noise` | **0** | verdict 影響なし・per-AC JSON `self_execution_result.failure_mode_signal: "noise"` を記録するだけ・retry trigger にしない |
+| `unclassified` (regex 不一致) | **3** (現行通り) | 既存 `fix_target` で fallback。挙動は `test_script_bug` と同じ (hunk patch retry を 3 回まで) |
+
+### 適用規則
+
+- Step 10 iteration ごとに最新 self_execution_result の `failure_mode_signal` を再評価する (前 iteration と異なる signal なら新規 routing を適用)。
+- `spec_violation` で escalation する場合、`escalation_context.fix_target_forced: "implementation"` を per-AC JSON に明示する。aggregator は本フラグを見て Generator routing を強制する。
+- `noise` 判定は **verdict が `pass` でも `fail` でも独立に付与可能** (信号として記録するだけで verdict には影響しない)。
+- routing 表は本ファイルが single source of truth。evaluator-per-ac.md / evaluator-aggregator.md は本表を参照して動作を決める (二重定義禁止)。

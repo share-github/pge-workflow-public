@@ -138,6 +138,7 @@ evaluator per-ac Step 0 が **capability composition** で test design を確定
     {"name": "O-aria-tree", "available": true, "evidence": "phase1/{<screen-slugs>}/aria_snapshot.yaml exist"},
     {"name": "O-http-status", "available": true, "evidence": "route_map.json + Playwright request mode available"},
     {"name": "O-http-response-shape", "available": false, "reason": "api_contract_map.json: 'No OpenAPI spec or JSON endpoints'"},
+    {"name": "O-html-content", "available": true, "evidence": "_framework.json#view_engine_type='server-side-template' + T-http-request-curl available"},
     {"name": "O-exit-code", "available": true, "evidence": "T-shell-command available"},
     {"name": "O-stdout-pattern", "available": true, "evidence": "T-shell-command + grep universal"},
     {"name": "O-stderr-pattern", "available": true, "evidence": "T-shell-command + grep universal"},
@@ -146,7 +147,8 @@ evaluator per-ac Step 0 が **capability composition** で test design を確定
     {"name": "O-log-line-pattern", "available": true, "evidence": "_framework.json logging: <logging library>"},
     {"name": "O-file-existence", "available": true, "evidence": "bash universal"},
     {"name": "O-file-content", "available": true, "evidence": "bash + grep universal"}
-  ]
+  ],
+  "view_engine_type": "server-side-template"
 }
 ```
 
